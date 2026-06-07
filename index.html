@@ -1,0 +1,1235 @@
+<!DOCTYPE html>
+<html lang="fr"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=yes"><title>PWA App</title><link rel="manifest" href="manifest.json"><script src="https://cdn.tailwindcss.com"></script><style>body{margin:0;padding:0;background-color:#030712;font-family:system-ui;min-height:100vh;display:flex;align-items:center;justify-content:center;}#root{width:100%;display:flex;justify-content:center;align-items:center;}</style></head><body><div id="root"></div><script src="https://cdn.jsdelivr.net/npm/react@18.2.0/umd/react.production.min.js"></script><script src="https://cdn.jsdelivr.net/npm/react-dom@18.2.0/umd/react-dom.production.min.js"></script><script>const {
+  useState,
+  useEffect,
+  useCallback,
+  useMemo,
+  useRef
+} = React;
+const App = () => {
+  // ========== ÉTATS PRINCIPAUX ==========
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [currentView, setCurrentView] = useState('home');
+  const [selectedBrand, setSelectedBrand] = useState(null);
+  const [isTransitioning, setIsTransitioning] = useState(false);
+  const [notification, setNotification] = useState(null);
+
+  // États des modales admin
+  const [showModal, setShowModal] = useState(false);
+  const [showProductModal, setShowProductModal] = useState(false);
+  const [showBrandSelect, setShowBrandSelect] = useState(false);
+  const [showManageModal, setShowManageModal] = useState(false);
+  const [showOrdersModal, setShowOrdersModal] = useState(false);
+  const [showDataModal, setShowDataModal] = useState(false);
+  const [editingProduct, setEditingProduct] = useState(null);
+  const [editingBrand, setEditingBrand] = useState(null);
+  const [manageSelectedBrand, setManageSelectedBrand] = useState(null);
+
+  // État pour la confirmation interne
+  const [confirmAction, setConfirmAction] = useState(null);
+
+  // Données
+  const [brands, setBrands] = useState(() => {
+    const saved = localStorage.getItem('marketHubBrands');
+    return saved ? JSON.parse(saved) : [];
+  });
+  const [newBrand, setNewBrand] = useState({
+    name: "",
+    image: null
+  });
+  const [newProduct, setNewProduct] = useState({
+    name: "",
+    qty: "",
+    price: "",
+    image: null,
+    brandId: null
+  });
+
+  // Panier et commandes
+  const [cart, setCart] = useState(() => {
+    const savedCart = localStorage.getItem('marketHubCart');
+    return savedCart ? JSON.parse(savedCart) : [];
+  });
+  const [orders, setOrders] = useState(() => {
+    const savedOrders = localStorage.getItem('marketHubOrders');
+    return savedOrders ? JSON.parse(savedOrders) : [];
+  });
+
+  // Modale produit client
+  const [selectedProduct, setSelectedProduct] = useState(null);
+  const [showCartModal, setShowCartModal] = useState(false);
+  const [productQuantity, setProductQuantity] = useState(1);
+
+  // Modale livraison
+  const [showDeliveryModal, setShowDeliveryModal] = useState(false);
+  const [deliveryInfo, setDeliveryInfo] = useState({
+    name: "",
+    phone: "",
+    address: "",
+    instructions: ""
+  });
+
+  // Onglet des commandes admin
+  const [ordersActiveTab, setOrdersActiveTab] = useState("new");
+
+  // ========== DÉBOGAGE CONSOLE ==========
+  const [logs, setLogs] = useState([]);
+  const [showDebug, setShowDebug] = useState(false);
+  const logsEndRef = useRef(null);
+
+  // État pour SheetJS
+  const [sheetJsReady, setSheetJsReady] = useState(false);
+
+  // État pour la prévisualisation d'import
+  const [previewData, setPreviewData] = useState(null); // { brandProducts: Map, totalProducts, totalBrands, errors }
+
+  const addLog = useCallback((type, ...args) => {
+    const timestamp = new Date().toLocaleTimeString();
+    const message = args.map(arg => {
+      if (typeof arg === 'object') {
+        try {
+          return JSON.stringify(arg);
+        } catch (e) {
+          return String(arg);
+        }
+      }
+      return String(arg);
+    }).join(' ');
+    setLogs(prev => [{
+      type,
+      timestamp,
+      message
+    }, ...prev].slice(0, 500));
+  }, []);
+  useEffect(() => {
+    const originalLog = console.log;
+    const originalError = console.error;
+    console.log = (...args) => {
+      addLog('log', ...args);
+      originalLog(...args);
+    };
+    console.error = (...args) => {
+      addLog('error', ...args);
+      originalError(...args);
+    };
+    const handleGlobalError = event => {
+      addLog('error', `Global: ${event.message} at ${event.filename}:${event.lineno}`);
+    };
+    const handlePromiseRejection = event => {
+      addLog('error', `Unhandled Rejection: ${event.reason}`);
+    };
+    window.addEventListener('error', handleGlobalError);
+    window.addEventListener('unhandledrejection', handlePromiseRejection);
+    return () => {
+      console.log = originalLog;
+      console.error = originalError;
+      window.removeEventListener('error', handleGlobalError);
+      window.removeEventListener('unhandledrejection', handlePromiseRejection);
+    };
+  }, [addLog]);
+
+  // ========== CHARGEMENT DYNAMIQUE DE SHEETJS ==========
+  useEffect(() => {
+    if (window.XLSX) {
+      setSheetJsReady(true);
+      addLog('log', 'SheetJS déjà présent');
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = 'https://cdn.sheetjs.com/xlsx-0.20.2/package/dist/xlsx.full.min.js';
+    script.async = true;
+    script.onload = () => {
+      setSheetJsReady(true);
+      addLog('log', 'SheetJS chargé dynamiquement');
+    };
+    script.onerror = () => {
+      addLog('error', 'Échec du chargement de SheetJS');
+      notify("Impossible de charger la bibliothèque Excel");
+    };
+    document.head.appendChild(script);
+  }, [addLog]);
+
+  // ========== SERVICE WORKER ==========
+  useEffect(() => {
+    if ('serviceWorker' in navigator) {
+      const isSecure = window.location.protocol === 'https:' || window.location.protocol === 'http:';
+      if (isSecure) {
+        navigator.serviceWorker.register('/service-worker.js').catch(err => {
+          console.warn("Service Worker registration failed:", err);
+          addLog('error', `Service Worker error: ${err.message}`);
+        });
+      } else {
+        console.log("Service Worker non enregistré (protocole non sécurisé)");
+      }
+    }
+  }, [addLog]);
+  useEffect(() => {
+    if (logsEndRef.current) {
+      logsEndRef.current.scrollIntoView({
+        behavior: 'smooth'
+      });
+    }
+  }, [logs]);
+  const copyLogs = async () => {
+    const text = logs.map(l => `[${l.timestamp}] ${l.type.toUpperCase()}: ${l.message}`).join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      alert('Rapport copié dans le presse-papier');
+    } catch (err) {
+      alert('Impossible de copier');
+    }
+  };
+  const DebugConsole = () => /*#__PURE__*/React.createElement("div", {
+    className: `fixed bottom-0 left-0 right-0 z-50 transition-all duration-300 ${showDebug ? 'h-40' : 'h-8'}`
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "bg-black/90 backdrop-blur-md w-full text-white text-xs"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex justify-between items-center px-2 py-1 border-b border-gray-700"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowDebug(!showDebug),
+    className: "bg-gray-700 px-2 py-0.5 rounded text-white"
+  }, showDebug ? '▼ Masquer' : '▲ Logs'), showDebug && /*#__PURE__*/React.createElement("button", {
+    onClick: copyLogs,
+    className: "bg-blue-600 px-2 py-0.5 rounded text-white"
+  }, "Copier le rapport")), showDebug && /*#__PURE__*/React.createElement("div", {
+    className: "overflow-y-auto h-32 p-2 font-mono text-[10px] leading-relaxed"
+  }, logs.length === 0 && /*#__PURE__*/React.createElement("div", {
+    className: "text-gray-400"
+  }, "Aucun log pour l'instant"), logs.map((log, idx) => /*#__PURE__*/React.createElement("div", {
+    key: idx,
+    className: `border-b border-gray-800 py-0.5 ${log.type === 'error' ? 'text-red-400' : 'text-green-300'}`
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-gray-500"
+  }, "[", log.timestamp, "]"), " [", log.type.toUpperCase(), "] ", log.message)), /*#__PURE__*/React.createElement("div", {
+    ref: logsEndRef
+  }))));
+
+  // ========== SAUVEGARDES ==========
+  useEffect(() => {
+    localStorage.setItem('marketHubCart', JSON.stringify(cart));
+  }, [cart]);
+  useEffect(() => {
+    localStorage.setItem('marketHubBrands', JSON.stringify(brands));
+  }, [brands]);
+  useEffect(() => {
+    localStorage.setItem('marketHubOrders', JSON.stringify(orders));
+  }, [orders]);
+
+  // ========== NOTIFICATIONS ==========
+  const notify = msg => {
+    setNotification(msg);
+    setTimeout(() => setNotification(null), 2000);
+  };
+
+  // ========== GESTION DES IMAGES ==========
+  const handleImageUpload = (e, setter, state) => {
+    const file = e.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onload = event => {
+        const img = new Image();
+        img.onload = () => {
+          const canvas = document.createElement("canvas");
+          const size = 300;
+          canvas.width = size;
+          canvas.height = size;
+          const ctx = canvas.getContext("2d");
+          const ratio = Math.max(size / img.width, size / img.height);
+          const w = img.width * ratio;
+          const h = img.height * ratio;
+          ctx.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
+          setter({
+            ...state,
+            image: canvas.toDataURL("image/jpeg", 0.9)
+          });
+        };
+        img.src = event.target.result;
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  // ========== ACTIONS MARQUES ==========
+  const addBrand = () => {
+    if (newBrand.name) {
+      setBrands([...brands, {
+        id: Date.now(),
+        ...newBrand,
+        products: []
+      }]);
+      setNewBrand({
+        name: "",
+        image: null
+      });
+      setShowModal(false);
+      notify("Marque ajoutée");
+    }
+  };
+  const deleteBrand = id => {
+    setBrands(brands.filter(b => b.id !== id));
+    notify("Marque supprimée");
+  };
+  const saveBrandEdit = () => {
+    setBrands(brands.map(b => b.id === editingBrand.id ? editingBrand : b));
+    setEditingBrand(null);
+    notify("Marque mise à jour");
+  };
+
+  // ========== ACTIONS PRODUITS ==========
+  const addProduct = () => {
+    if (newProduct.name && newProduct.brandId) {
+      setBrands(brands.map(b => b.id === newProduct.brandId ? {
+        ...b,
+        products: [...b.products, {
+          id: Date.now(),
+          ...newProduct
+        }]
+      } : b));
+      setNewProduct({
+        name: "",
+        qty: "",
+        price: "",
+        image: null,
+        brandId: null
+      });
+      setShowProductModal(false);
+      notify("Produit ajouté");
+    }
+  };
+  const saveProductEdit = () => {
+    setBrands(brands.map(b => ({
+      ...b,
+      products: b.products.map(p => p.id === editingProduct.id ? editingProduct : p)
+    })));
+    setEditingProduct(null);
+    notify("Produit modifié");
+  };
+  const deleteProduct = (brandId, productId) => {
+    setBrands(brands.map(b => b.id === brandId ? {
+      ...b,
+      products: b.products.filter(p => p.id !== productId)
+    } : b));
+    notify("Produit supprimé");
+  };
+
+  // ========== EXPORT EXCEL ==========
+  const exportToExcel = () => {
+    if (!window.XLSX) {
+      notify("Bibliothèque Excel pas encore chargée, réessayez dans quelques secondes");
+      return;
+    }
+    try {
+      const data = [["Marque", "Produit", "Quantité", "Prix"], ...brands.flatMap(b => b.products.map(p => [b.name, p.name, p.qty, p.price]))];
+      const ws = window.XLSX.utils.aoa_to_sheet(data);
+      const wb = window.XLSX.utils.book_new();
+      window.XLSX.utils.book_append_sheet(wb, ws, "Inventaire");
+      window.XLSX.writeFile(wb, "export_inventaire.xlsx");
+      notify("Export Excel réussi");
+    } catch (err) {
+      addLog('error', "Export échoué : " + err.message);
+      notify("Erreur lors de l'export");
+    }
+  };
+
+  // ========== NOUVEL IMPORT AVEC PREVISUALISATION ET UPSERT ==========
+  const analyzeImportFile = file => {
+    if (!window.XLSX) {
+      notify("Bibliothèque Excel pas encore chargée");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = evt => {
+      try {
+        const data = new Uint8Array(evt.target.result);
+        const wb = window.XLSX.read(data, {
+          type: 'array'
+        });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+
+        // Lire la première ligne pour vérifier les en-têtes
+        const firstRow = window.XLSX.utils.sheet_to_json(ws, {
+          header: 1,
+          defval: ""
+        })[0];
+        if (!firstRow || firstRow.length < 4) {
+          throw new Error("Le fichier doit contenir au moins 4 colonnes");
+        }
+        const expectedHeaders = ["Marque", "Produit", "Quantité", "Prix"];
+        const headers = firstRow.slice(0, 4).map(cell => String(cell).trim());
+        const isValid = expectedHeaders.every((h, idx) => headers[idx] === h);
+        if (!isValid) {
+          notify(`En-têtes incorrectes. Attendu: ${expectedHeaders.join(', ')}. Reçu: ${headers.join(', ')}`);
+          return;
+        }
+
+        // Lire toutes les lignes (2D)
+        const rows = window.XLSX.utils.sheet_to_json(ws, {
+          header: 1,
+          defval: ""
+        });
+        if (!rows || rows.length < 2) throw new Error("Fichier vide");
+
+        // Structure temporaire : Map(brandName -> Map(productName -> { qty, price }))
+        const brandProducts = new Map();
+        let totalProducts = 0;
+        let errors = [];
+        for (let i = 1; i < rows.length; i++) {
+          const row = rows[i];
+          if (!row || row.length < 4) continue;
+          let brandName = row[0] ? String(row[0]).trim() : "";
+          const productName = row[1] ? String(row[1]).trim() : "";
+          const qtyRaw = row[2];
+          const priceRaw = row[3];
+          if (productName === "") continue; // ignorer lignes sans produit
+          if (brandName === "") brandName = "Inconnue";
+
+          // Validation des nombres
+          let qty = 0,
+            price = 0;
+          let valid = true;
+          if (isNaN(parseFloat(qtyRaw)) || !isFinite(qtyRaw)) {
+            errors.push(`Ligne ${i + 1}: Quantité non numérique (${qtyRaw}) pour ${productName}`);
+            valid = false;
+          } else {
+            qty = parseFloat(qtyRaw);
+          }
+          if (isNaN(parseFloat(priceRaw)) || !isFinite(priceRaw)) {
+            errors.push(`Ligne ${i + 1}: Prix non numérique (${priceRaw}) pour ${productName}`);
+            valid = false;
+          } else {
+            price = parseFloat(priceRaw);
+          }
+          if (!valid) continue;
+          if (!brandProducts.has(brandName)) {
+            brandProducts.set(brandName, new Map());
+          }
+          const productsMap = brandProducts.get(brandName);
+          if (!productsMap.has(productName)) {
+            productsMap.set(productName, {
+              qty,
+              price
+            });
+            totalProducts++;
+          } else {
+            // Si doublon dans le même fichier, on écrase (ou on cumule ? Ici on écrase)
+            productsMap.set(productName, {
+              qty,
+              price
+            });
+          }
+        }
+        setPreviewData({
+          brandProducts,
+          totalProducts,
+          totalBrands: brandProducts.size,
+          errors
+        });
+        notify(`Analyse terminée : ${totalProducts} produits dans ${brandProducts.size} marques. ${errors.length} erreurs.`);
+      } catch (err) {
+        addLog('error', "Analyse échouée : " + err.message);
+        notify("Erreur lors de l'analyse du fichier");
+        setPreviewData(null);
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  };
+  const confirmImport = () => {
+    if (!previewData) return;
+    const {
+      brandProducts
+    } = previewData;
+    let updatedBrands = [...brands];
+    let productsAdded = 0;
+    let productsUpdated = 0;
+    for (let [brandName, productsMap] of brandProducts.entries()) {
+      // Chercher la marque existante
+      let brandIndex = updatedBrands.findIndex(b => b.name === brandName);
+      if (brandIndex === -1) {
+        // Créer la marque
+        const newBrand = {
+          id: Date.now() + Math.random() * 10000,
+          name: brandName,
+          image: null,
+          products: []
+        };
+        updatedBrands.push(newBrand);
+        brandIndex = updatedBrands.length - 1;
+      }
+      const brand = updatedBrands[brandIndex];
+      const existingProducts = brand.products;
+      for (let [productName, {
+        qty,
+        price
+      }] of productsMap.entries()) {
+        const existingIndex = existingProducts.findIndex(p => p.name === productName);
+        if (existingIndex !== -1) {
+          // Mise à jour (upsert)
+          existingProducts[existingIndex].qty = qty;
+          existingProducts[existingIndex].price = price;
+          productsUpdated++;
+        } else {
+          // Création
+          existingProducts.push({
+            id: Date.now() + Math.random() * 10000,
+            name: productName,
+            qty: qty,
+            price: price,
+            image: null
+          });
+          productsAdded++;
+        }
+      }
+      // Remplacer les produits de la marque
+      updatedBrands[brandIndex].products = existingProducts;
+    }
+    setBrands(updatedBrands);
+    notify(`Import confirmé : ${productsAdded} nouveaux produits, ${productsUpdated} mis à jour.`);
+    setPreviewData(null);
+    setShowDataModal(false);
+  };
+  const cancelPreview = () => {
+    setPreviewData(null);
+    notify("Import annulé");
+  };
+
+  // ========== NAVIGATION ==========
+  const openBrand = brand => {
+    setIsTransitioning(true);
+    setTimeout(() => {
+      setSelectedBrand(brand);
+      setCurrentView('brand');
+      setIsTransitioning(false);
+    }, 300);
+  };
+  const goHome = () => {
+    setIsTransitioning(true);
+    setTimeout(() => {
+      setCurrentView('home');
+      setIsTransitioning(false);
+    }, 300);
+  };
+  const toggleAdmin = () => {
+    const newAdminState = !isAdmin;
+    setIsAdmin(newAdminState);
+    if (newAdminState) goHome();
+  };
+
+  // ========== PANIER & COMMANDE ==========
+  const openProductModal = product => {
+    setSelectedProduct(product);
+    setProductQuantity(1);
+    setShowCartModal(false);
+  };
+  const addToCart = () => {
+    if (!selectedProduct) return;
+    const existing = cart.find(item => item.product.id === selectedProduct.id && item.brandId === selectedBrand?.id);
+    if (existing) {
+      setCart(cart.map(item => item.product.id === selectedProduct.id && item.brandId === selectedBrand?.id ? {
+        ...item,
+        quantity: item.quantity + productQuantity
+      } : item));
+    } else {
+      setCart([...cart, {
+        product: selectedProduct,
+        brandId: selectedBrand.id,
+        brandName: selectedBrand.name,
+        quantity: productQuantity
+      }]);
+    }
+    notify(`${productQuantity} × ${selectedProduct.name} ajouté au panier`);
+    setSelectedProduct(null);
+  };
+  const removeFromCart = index => {
+    const newCart = [...cart];
+    newCart.splice(index, 1);
+    setCart(newCart);
+    notify("Article retiré");
+  };
+  const cartTotal = cart.reduce((sum, item) => sum + parseFloat(item.product.price) * item.quantity, 0);
+  const openDeliveryModal = () => {
+    setShowCartModal(false);
+    setDeliveryInfo({
+      name: "",
+      phone: "",
+      address: "",
+      instructions: ""
+    });
+    setShowDeliveryModal(true);
+  };
+  const validateOrder = () => {
+    if (!deliveryInfo.name || !deliveryInfo.address) {
+      notify("Veuillez entrer au moins le nom et l'adresse");
+      return;
+    }
+    const newOrder = {
+      id: Date.now(),
+      timestamp: new Date().toLocaleString(),
+      items: [...cart],
+      delivery: {
+        ...deliveryInfo
+      },
+      total: cartTotal,
+      status: "new"
+    };
+    setOrders([newOrder, ...orders]);
+    setCart([]);
+    setShowDeliveryModal(false);
+    notify(`Commande envoyée ! Total : ${cartTotal.toFixed(2)}€`);
+  };
+
+  // ========== ADMIN COMMANDES ==========
+  const updateOrderStatus = (orderId, newStatus) => {
+    setOrders(orders.map(order => order.id === orderId ? {
+      ...order,
+      status: newStatus
+    } : order));
+    notify(`Commande ${newStatus === "processed" ? "marquée traitée" : "marquée livrée"}`);
+  };
+  const newOrders = orders.filter(o => o.status === "new");
+  const processedOrders = orders.filter(o => o.status === "processed");
+  const deliveredOrders = orders.filter(o => o.status === "delivered");
+
+  // ========== CONFIRMATION INTERNE ==========
+  const requestConfirm = (type, payload, callback) => {
+    setConfirmAction({
+      type,
+      payload,
+      callback
+    });
+  };
+  const cancelConfirm = () => setConfirmAction(null);
+  const executeConfirm = () => {
+    if (confirmAction && confirmAction.callback) {
+      confirmAction.callback();
+    }
+    setConfirmAction(null);
+  };
+
+  // ========== RENDU PRINCIPAL ==========
+  return /*#__PURE__*/React.createElement("div", {
+    className: "fixed inset-0 bg-stone-100 flex justify-center font-sans"
+  }, notification && /*#__PURE__*/React.createElement("div", {
+    className: "fixed top-6 z-[100] bg-neutral-800 text-neutral-100 px-6 py-3 rounded-full text-xs font-bold shadow-2xl animate-fade-in-down"
+  }, notification), /*#__PURE__*/React.createElement("div", {
+    className: `w-full max-w-[360px] min-h-screen p-4 bg-white/80 backdrop-blur-xl transition-opacity duration-300 ${isTransitioning ? 'opacity-0' : 'opacity-100'}`
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex justify-between items-center mb-8 mt-2"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: goHome,
+    className: "text-neutral-500 text-[11px] font-medium tracking-tight hover:opacity-70 transition-opacity"
+  }, currentView === 'home' ? 'LAICHE HOLDING' : '← Retour'), /*#__PURE__*/React.createElement("button", {
+    onClick: toggleAdmin,
+    className: `px-4 py-1 text-[10px] font-semibold uppercase tracking-widest rounded-lg border transition-all ${isAdmin ? "bg-neutral-800 text-white border-neutral-800" : "bg-white text-neutral-600 border-neutral-300 hover:bg-neutral-50"}`
+  }, isAdmin ? "Admin" : "Connexion")), currentView === 'home' ? isAdmin ? /*#__PURE__*/React.createElement("div", {
+    className: "flex flex-col gap-3"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowModal(true),
+    className: "w-full py-3 bg-neutral-200 shadow-sm border border-neutral-300 font-medium rounded-xl hover:bg-neutral-300 transition-all text-neutral-800"
+  }, "+ Ajouter une marque"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowBrandSelect(true),
+    className: "w-full py-3 bg-neutral-200 shadow-sm border border-neutral-300 font-medium rounded-xl hover:bg-neutral-300 transition-all text-neutral-800"
+  }, "+ Ajouter un produit"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowManageModal(true),
+    className: "w-full py-3 bg-neutral-200 shadow-sm border border-neutral-300 font-medium rounded-xl hover:bg-neutral-300 transition-all text-neutral-800"
+  }, "G\xE9rer"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowDataModal(true),
+    className: "w-full py-3 bg-blue-100 shadow-sm border border-blue-200 font-medium rounded-xl hover:bg-blue-200 text-blue-800"
+  }, "Donn\xE9es"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowOrdersModal(true),
+    className: "w-full py-3 bg-neutral-200 shadow-sm border border-neutral-300 font-medium rounded-xl hover:bg-neutral-300 transition-all text-neutral-800"
+  }, "Commandes")) : /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-2 gap-4"
+  }, brands.map(brand => /*#__PURE__*/React.createElement("div", {
+    key: brand.id,
+    className: "flex flex-col items-center gap-2"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => openBrand(brand),
+    className: "w-full aspect-square rounded-[24px] overflow-hidden border border-neutral-200 bg-white shadow-md transition-transform active:scale-95 hover:shadow-lg"
+  }, brand.image ? /*#__PURE__*/React.createElement("img", {
+    src: brand.image,
+    className: "w-full h-full object-cover"
+  }) : /*#__PURE__*/React.createElement("div", {
+    className: "w-full h-full bg-neutral-50 flex items-center justify-center text-[10px] text-neutral-400 font-medium"
+  }, "IMAGE")), /*#__PURE__*/React.createElement("span", {
+    className: "text-neutral-700 font-semibold text-xs tracking-tight bg-neutral-100 px-2 py-0.5 rounded-full"
+  }, brand.name)))) : /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-2 gap-4"
+  }, selectedBrand.products.map(prod => /*#__PURE__*/React.createElement("div", {
+    key: prod.id,
+    className: "flex flex-col items-center gap-2 bg-white p-2 rounded-2xl shadow-sm"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => openProductModal(prod),
+    className: "w-full aspect-square rounded-[20px] overflow-hidden border border-neutral-100 bg-neutral-50 active:scale-95 transition-transform"
+  }, prod.image ? /*#__PURE__*/React.createElement("img", {
+    src: prod.image,
+    className: "w-full h-full object-cover"
+  }) : /*#__PURE__*/React.createElement("div", {
+    className: "w-full h-full bg-neutral-100 flex items-center justify-center text-[10px] text-neutral-400 font-medium"
+  }, "PROD")), /*#__PURE__*/React.createElement("span", {
+    className: "text-neutral-800 font-medium text-xs text-center px-1"
+  }, prod.name), /*#__PURE__*/React.createElement("span", {
+    className: "text-neutral-800 font-bold text-sm bg-neutral-100 px-3 py-1 rounded-full"
+  }, prod.price, "\u20AC")))), !isAdmin && /*#__PURE__*/React.createElement("div", {
+    className: "fixed bottom-0 left-0 right-0 flex justify-center pointer-events-none z-40"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "w-full max-w-[360px] px-4 pb-4 pointer-events-auto"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "relative inline-block"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowCartModal(true),
+    className: "w-12 h-12 bg-neutral-900 rounded-xl shadow-xl flex items-center justify-center active:scale-95 transition-all"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-white text-xl font-bold"
+  }, "\uD83D\uDED2")), cart.length > 0 && /*#__PURE__*/React.createElement("span", {
+    className: "absolute -top-2 -right-2 bg-green-600 text-white text-[10px] font-bold rounded-full w-5 h-5 flex items-center justify-center shadow-md"
+  }, cart.reduce((s, i) => s + i.quantity, 0))))), selectedProduct && !isAdmin && /*#__PURE__*/React.createElement("div", {
+    className: "fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center p-4 z-50"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "bg-white w-full max-w-[320px] rounded-3xl overflow-hidden shadow-2xl"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "aspect-square bg-neutral-100"
+  }, selectedProduct.image ? /*#__PURE__*/React.createElement("img", {
+    src: selectedProduct.image,
+    className: "w-full h-full object-cover"
+  }) : /*#__PURE__*/React.createElement("div", {
+    className: "w-full h-full flex items-center justify-center text-neutral-400 text-sm"
+  }, "Pas d'image")), /*#__PURE__*/React.createElement("div", {
+    className: "p-5"
+  }, /*#__PURE__*/React.createElement("h3", {
+    className: "text-xl font-bold text-neutral-800"
+  }, selectedProduct.name), /*#__PURE__*/React.createElement("p", {
+    className: "text-neutral-500 text-sm mt-1"
+  }, "Prix unitaire : ", selectedProduct.price, "\u20AC"), /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center justify-between mt-4"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "text-neutral-600 font-medium"
+  }, "Quantit\xE9"), /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center gap-3"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setProductQuantity(Math.max(1, productQuantity - 1)),
+    className: "w-8 h-8 bg-neutral-100 rounded-full font-bold text-neutral-600 active:scale-95"
+  }, "-"), /*#__PURE__*/React.createElement("span", {
+    className: "w-8 text-center font-semibold"
+  }, productQuantity), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setProductQuantity(productQuantity + 1),
+    className: "w-8 h-8 bg-neutral-100 rounded-full font-bold text-neutral-600 active:scale-95"
+  }, "+"))), /*#__PURE__*/React.createElement("button", {
+    onClick: addToCart,
+    className: "w-full mt-6 py-3 bg-green-700 text-white rounded-xl font-bold active:scale-95"
+  }, "Ajouter au panier \xB7 ", (selectedProduct.price * productQuantity).toFixed(2), "\u20AC"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setSelectedProduct(null),
+    className: "w-full mt-3 py-2 bg-neutral-100 text-neutral-600 rounded-xl text-sm active:scale-95"
+  }, "Fermer")))), showCartModal && !isAdmin && /*#__PURE__*/React.createElement("div", {
+    className: "fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 z-50"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "bg-white w-full max-w-[340px] rounded-2xl shadow-2xl max-h-[80vh] flex flex-col"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "p-4 border-b border-neutral-100 flex justify-between items-center"
+  }, /*#__PURE__*/React.createElement("h2", {
+    className: "text-lg font-bold text-neutral-800"
+  }, "Mon panier"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowCartModal(false),
+    className: "text-neutral-400 text-2xl"
+  }, "\xD7")), /*#__PURE__*/React.createElement("div", {
+    className: "flex-1 overflow-y-auto p-4"
+  }, cart.length === 0 ? /*#__PURE__*/React.createElement("p", {
+    className: "text-center text-neutral-400 py-8"
+  }, "Votre panier est vide") : /*#__PURE__*/React.createElement("div", {
+    className: "space-y-3"
+  }, cart.map((item, idx) => /*#__PURE__*/React.createElement("div", {
+    key: idx,
+    className: "flex gap-3 items-center border-b border-neutral-100 pb-3"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "w-12 h-12 bg-neutral-100 rounded-lg overflow-hidden flex-shrink-0"
+  }, item.product.image ? /*#__PURE__*/React.createElement("img", {
+    src: item.product.image,
+    className: "w-full h-full object-cover"
+  }) : /*#__PURE__*/React.createElement("div", {
+    className: "w-full h-full flex items-center justify-center text-[8px] text-neutral-400"
+  }, "img")), /*#__PURE__*/React.createElement("div", {
+    className: "flex-1"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "font-semibold text-neutral-800 text-sm"
+  }, item.product.name), /*#__PURE__*/React.createElement("p", {
+    className: "text-neutral-500 text-xs"
+  }, item.brandName, " \xB7 ", item.quantity, " \xD7 ", item.product.price, "\u20AC"), /*#__PURE__*/React.createElement("p", {
+    className: "text-green-700 text-xs font-bold"
+  }, (item.product.price * item.quantity).toFixed(2), "\u20AC")), /*#__PURE__*/React.createElement("button", {
+    onClick: () => removeFromCart(idx),
+    className: "w-8 h-8 bg-red-100 text-red-600 rounded-full font-bold active:scale-95"
+  }, "\u2715"))))), cart.length > 0 && /*#__PURE__*/React.createElement("div", {
+    className: "p-4 border-t border-neutral-100"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex justify-between font-bold text-neutral-800 mb-3"
+  }, /*#__PURE__*/React.createElement("span", null, "Total"), /*#__PURE__*/React.createElement("span", null, cartTotal.toFixed(2), "\u20AC")), /*#__PURE__*/React.createElement("button", {
+    onClick: openDeliveryModal,
+    className: "w-full py-3 bg-neutral-800 text-white rounded-xl font-bold active:scale-95"
+  }, "Valider la commande")))), showDeliveryModal && !isAdmin && /*#__PURE__*/React.createElement("div", {
+    className: "fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 z-50"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "bg-white w-full max-w-[340px] rounded-2xl shadow-2xl p-6"
+  }, /*#__PURE__*/React.createElement("h2", {
+    className: "text-xl font-bold text-neutral-800 mb-4"
+  }, "Livraison"), /*#__PURE__*/React.createElement("div", {
+    className: "space-y-3"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    autoComplete: "off",
+    placeholder: "Nom / Entreprise *",
+    className: "w-full p-3 bg-neutral-50 rounded-xl border border-neutral-200 outline-none focus:border-neutral-400",
+    value: deliveryInfo.name,
+    onChange: e => setDeliveryInfo({
+      ...deliveryInfo,
+      name: e.target.value
+    })
+  }), /*#__PURE__*/React.createElement("input", {
+    type: "tel",
+    autoComplete: "off",
+    placeholder: "T\xE9l\xE9phone",
+    className: "w-full p-3 bg-neutral-50 rounded-xl border border-neutral-200 outline-none focus:border-neutral-400",
+    value: deliveryInfo.phone,
+    onChange: e => setDeliveryInfo({
+      ...deliveryInfo,
+      phone: e.target.value
+    })
+  }), /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    autoComplete: "off",
+    placeholder: "Adresse *",
+    className: "w-full p-3 bg-neutral-50 rounded-xl border border-neutral-200 outline-none focus:border-neutral-400",
+    value: deliveryInfo.address,
+    onChange: e => setDeliveryInfo({
+      ...deliveryInfo,
+      address: e.target.value
+    })
+  }), /*#__PURE__*/React.createElement("textarea", {
+    autoComplete: "off",
+    placeholder: "Commentaire / instructions sp\xE9cifiques",
+    className: "w-full p-3 bg-neutral-50 rounded-xl border border-neutral-200 outline-none focus:border-neutral-400 resize-none",
+    rows: "2",
+    value: deliveryInfo.instructions,
+    onChange: e => setDeliveryInfo({
+      ...deliveryInfo,
+      instructions: e.target.value
+    })
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-3 mt-6"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowDeliveryModal(false),
+    className: "flex-1 py-3 bg-neutral-100 rounded-xl font-medium active:scale-95"
+  }, "Annuler"), /*#__PURE__*/React.createElement("button", {
+    onClick: validateOrder,
+    className: "flex-1 py-3 bg-green-700 text-white rounded-xl font-bold active:scale-95"
+  }, "Valider")))), showOrdersModal && isAdmin && /*#__PURE__*/React.createElement("div", {
+    className: "fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 z-50"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "bg-white w-full max-w-[340px] rounded-2xl shadow-2xl max-h-[85vh] flex flex-col"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "p-4 border-b border-neutral-100 flex justify-between items-center"
+  }, /*#__PURE__*/React.createElement("h2", {
+    className: "text-lg font-bold text-neutral-800"
+  }, "Commandes"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowOrdersModal(false),
+    className: "text-neutral-400 text-2xl"
+  }, "\xD7")), /*#__PURE__*/React.createElement("div", {
+    className: "flex border-b border-neutral-100"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setOrdersActiveTab("new"),
+    className: `flex-1 py-3 text-xs font-medium transition-all ${ordersActiveTab === "new" ? "text-neutral-800 border-b-2 border-neutral-800" : "text-neutral-500"}`
+  }, "Nouvelles (", newOrders.length, ")"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setOrdersActiveTab("processed"),
+    className: `flex-1 py-3 text-xs font-medium transition-all ${ordersActiveTab === "processed" ? "text-neutral-800 border-b-2 border-neutral-800" : "text-neutral-500"}`
+  }, "Trait\xE9es (", processedOrders.length, ")"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setOrdersActiveTab("delivered"),
+    className: `flex-1 py-3 text-xs font-medium transition-all ${ordersActiveTab === "delivered" ? "text-neutral-800 border-b-2 border-neutral-800" : "text-neutral-500"}`
+  }, "Livr\xE9es (", deliveredOrders.length, ")")), /*#__PURE__*/React.createElement("div", {
+    className: "flex-1 overflow-y-auto p-3"
+  }, ordersActiveTab === "new" && /*#__PURE__*/React.createElement("div", null, newOrders.length === 0 && /*#__PURE__*/React.createElement("p", {
+    className: "text-center text-neutral-400 py-4"
+  }, "Aucune nouvelle commande"), newOrders.map(order => /*#__PURE__*/React.createElement("div", {
+    key: order.id,
+    className: "mb-4 p-3 bg-neutral-50 rounded-xl border border-neutral-200"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "text-xs text-neutral-500 mb-1"
+  }, order.timestamp), /*#__PURE__*/React.createElement("div", {
+    className: "font-semibold text-neutral-800"
+  }, order.delivery.name), /*#__PURE__*/React.createElement("div", {
+    className: "text-xs text-neutral-600"
+  }, order.delivery.address), /*#__PURE__*/React.createElement("div", {
+    className: "text-xs text-neutral-600"
+  }, order.delivery.phone && `📞 ${order.delivery.phone}`), order.delivery.instructions && /*#__PURE__*/React.createElement("div", {
+    className: "text-xs italic text-neutral-500 mt-1"
+  }, "\uD83D\uDCDD ", order.delivery.instructions), /*#__PURE__*/React.createElement("div", {
+    className: "mt-2 space-y-1"
+  }, order.items.map((item, idx) => /*#__PURE__*/React.createElement("div", {
+    key: idx,
+    className: "flex justify-between text-xs"
+  }, /*#__PURE__*/React.createElement("span", null, item.quantity, "\xD7 ", item.product.name), /*#__PURE__*/React.createElement("span", null, (item.product.price * item.quantity).toFixed(2), "\u20AC")))), /*#__PURE__*/React.createElement("div", {
+    className: "flex justify-between items-center mt-2 pt-2 border-t border-neutral-200"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "font-bold"
+  }, "Total : ", order.total.toFixed(2), "\u20AC"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => requestConfirm("updateOrder", {
+      orderId: order.id,
+      newStatus: "processed"
+    }, () => updateOrderStatus(order.id, "processed")),
+    className: "px-3 py-1 bg-green-700 text-white rounded-lg text-xs font-bold active:scale-95"
+  }, "Marquer trait\xE9e"))))), ordersActiveTab === "processed" && /*#__PURE__*/React.createElement("div", null, processedOrders.length === 0 && /*#__PURE__*/React.createElement("p", {
+    className: "text-center text-neutral-400 py-4"
+  }, "Aucune commande trait\xE9e"), processedOrders.map(order => /*#__PURE__*/React.createElement("div", {
+    key: order.id,
+    className: "mb-4 p-3 bg-neutral-50 rounded-xl border border-neutral-200"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "text-xs text-neutral-500 mb-1"
+  }, order.timestamp), /*#__PURE__*/React.createElement("div", {
+    className: "font-semibold text-neutral-800"
+  }, order.delivery.name), /*#__PURE__*/React.createElement("div", {
+    className: "text-xs text-neutral-600"
+  }, order.delivery.address), /*#__PURE__*/React.createElement("div", {
+    className: "text-xs text-neutral-600"
+  }, order.delivery.phone && `📞 ${order.delivery.phone}`), order.delivery.instructions && /*#__PURE__*/React.createElement("div", {
+    className: "text-xs italic text-neutral-500 mt-1"
+  }, "\uD83D\uDCDD ", order.delivery.instructions), /*#__PURE__*/React.createElement("div", {
+    className: "mt-2 space-y-1"
+  }, order.items.map((item, idx) => /*#__PURE__*/React.createElement("div", {
+    key: idx,
+    className: "flex justify-between text-xs"
+  }, /*#__PURE__*/React.createElement("span", null, item.quantity, "\xD7 ", item.product.name), /*#__PURE__*/React.createElement("span", null, (item.product.price * item.quantity).toFixed(2), "\u20AC")))), /*#__PURE__*/React.createElement("div", {
+    className: "flex justify-between items-center mt-2 pt-2 border-t border-neutral-200"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "font-bold"
+  }, "Total : ", order.total.toFixed(2), "\u20AC"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => requestConfirm("updateOrder", {
+      orderId: order.id,
+      newStatus: "delivered"
+    }, () => updateOrderStatus(order.id, "delivered")),
+    className: "px-3 py-1 bg-blue-700 text-white rounded-lg text-xs font-bold active:scale-95"
+  }, "Marquer livr\xE9e"))))), ordersActiveTab === "delivered" && /*#__PURE__*/React.createElement("div", null, deliveredOrders.length === 0 && /*#__PURE__*/React.createElement("p", {
+    className: "text-center text-neutral-400 py-4"
+  }, "Aucune commande livr\xE9e"), deliveredOrders.map(order => /*#__PURE__*/React.createElement("div", {
+    key: order.id,
+    className: "mb-4 p-3 bg-neutral-50 rounded-xl border border-neutral-200 opacity-75"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "text-xs text-neutral-500 mb-1"
+  }, order.timestamp), /*#__PURE__*/React.createElement("div", {
+    className: "font-semibold text-neutral-800"
+  }, order.delivery.name), /*#__PURE__*/React.createElement("div", {
+    className: "text-xs text-neutral-600"
+  }, order.delivery.address), /*#__PURE__*/React.createElement("div", {
+    className: "text-xs text-neutral-600"
+  }, order.delivery.phone && `📞 ${order.delivery.phone}`), order.delivery.instructions && /*#__PURE__*/React.createElement("div", {
+    className: "text-xs italic text-neutral-500 mt-1"
+  }, "\uD83D\uDCDD ", order.delivery.instructions), /*#__PURE__*/React.createElement("div", {
+    className: "mt-2 space-y-1"
+  }, order.items.map((item, idx) => /*#__PURE__*/React.createElement("div", {
+    key: idx,
+    className: "flex justify-between text-xs"
+  }, /*#__PURE__*/React.createElement("span", null, item.quantity, "\xD7 ", item.product.name), /*#__PURE__*/React.createElement("span", null, (item.product.price * item.quantity).toFixed(2), "\u20AC")))), /*#__PURE__*/React.createElement("div", {
+    className: "flex justify-between items-center mt-2 pt-2 border-t border-neutral-200"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "font-bold"
+  }, "Total : ", order.total.toFixed(2), "\u20AC"), /*#__PURE__*/React.createElement("span", {
+    className: "text-xs text-green-700"
+  }, "Livr\xE9e")))))))), showDataModal && isAdmin && /*#__PURE__*/React.createElement("div", {
+    className: "fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4 z-50"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "bg-white w-full max-w-[340px] rounded-2xl p-6 shadow-2xl"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex justify-between items-center mb-4"
+  }, /*#__PURE__*/React.createElement("h2", {
+    className: "text-lg font-bold text-neutral-800"
+  }, "Gestion des donn\xE9es"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setShowDataModal(false);
+      setPreviewData(null);
+    },
+    className: "text-neutral-400 text-2xl"
+  }, "\xD7")), !sheetJsReady && /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-amber-600 mb-2"
+  }, "Chargement de la biblioth\xE8que Excel..."), !previewData ? /*#__PURE__*/React.createElement("div", {
+    className: "mt-2 flex flex-col gap-3"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: exportToExcel,
+    className: "w-full py-3 bg-neutral-800 text-white rounded-xl font-bold active:scale-95"
+  }, "Exporter tout l'inventaire (Excel)"), /*#__PURE__*/React.createElement("label", {
+    className: `w-full py-3 text-center rounded-xl font-bold transition-all active:scale-95 ${sheetJsReady ? 'bg-green-600 text-white cursor-pointer' : 'bg-neutral-200 text-neutral-400 cursor-not-allowed'}`
+  }, "Choisir un fichier Excel \xE0 importer", /*#__PURE__*/React.createElement("input", {
+    type: "file",
+    className: "hidden",
+    accept: ".xlsx, .xls, .csv",
+    disabled: !sheetJsReady,
+    onChange: e => {
+      const file = e.target.files[0];
+      if (file) analyzeImportFile(file);
+      e.target.value = '';
+    }
+  }))) : /*#__PURE__*/React.createElement("div", {
+    className: "mt-2"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "bg-neutral-100 p-3 rounded-lg mb-4"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "text-sm font-semibold text-neutral-800"
+  }, "Pr\xE9visualisation :"), /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-neutral-600"
+  }, previewData.totalProducts, " produits d\xE9tect\xE9s dans ", previewData.totalBrands, " marques"), previewData.errors.length > 0 && /*#__PURE__*/React.createElement("p", {
+    className: "text-xs text-red-500 mt-1"
+  }, previewData.errors.length, " erreurs de donn\xE9es (voir console)")), /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-3"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: cancelPreview,
+    className: "flex-1 py-2 bg-neutral-300 rounded-xl font-medium active:scale-95"
+  }, "Annuler"), /*#__PURE__*/React.createElement("button", {
+    onClick: confirmImport,
+    className: "flex-1 py-2 bg-blue-700 text-white rounded-xl font-bold active:scale-95"
+  }, "Confirmer l'importation"))), /*#__PURE__*/React.createElement("p", {
+    className: "text-[10px] text-neutral-400 mt-4 text-center"
+  }, "Format attendu : colonne A=Marque, B=Produit, C=Quantit\xE9, D=Prix (avec en-t\xEAtes)"))), (showModal || showProductModal || showBrandSelect || showManageModal || editingBrand) && /*#__PURE__*/React.createElement("div", {
+    className: "fixed inset-0 bg-black/20 backdrop-blur-sm flex items-center justify-center p-4 z-50"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "bg-white w-full p-6 rounded-[28px] border-t border-neutral-300 shadow-2xl max-h-[80vh] overflow-y-auto"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex justify-end"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => {
+      setShowModal(false);
+      setShowProductModal(false);
+      setShowBrandSelect(false);
+      setShowManageModal(false);
+      setEditingBrand(null);
+      setEditingProduct(null);
+    },
+    className: "text-neutral-400 text-2xl hover:text-neutral-800"
+  }, "\xD7")), editingBrand && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("h2", {
+    className: "text-neutral-800 font-bold mb-6 text-lg border-l-4 border-neutral-400 pl-3"
+  }, "Modifier Marque"), /*#__PURE__*/React.createElement("label", {
+    className: "text-[9px] uppercase font-bold text-neutral-400 tracking-wider"
+  }, "Nom"), /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    autoComplete: "off",
+    className: "w-full p-3 mb-4 bg-neutral-50 rounded-lg outline-none focus:bg-white",
+    value: editingBrand.name,
+    onChange: e => setEditingBrand({
+      ...editingBrand,
+      name: e.target.value
+    })
+  }), /*#__PURE__*/React.createElement("label", {
+    className: "text-[9px] uppercase font-bold text-neutral-400 tracking-wider"
+  }, "Image"), /*#__PURE__*/React.createElement("input", {
+    type: "file",
+    accept: "image/*",
+    autoComplete: "off",
+    onChange: e => handleImageUpload(e, setEditingBrand, editingBrand),
+    className: "mb-8 w-full text-sm"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-3"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setEditingBrand(null),
+    className: "flex-1 py-3 bg-neutral-100 rounded-xl font-medium"
+  }, "Annuler"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => requestConfirm("saveBrand", null, saveBrandEdit),
+    className: "flex-1 py-3 bg-green-700 text-white rounded-xl font-medium"
+  }, "Enregistrer"))), showModal && !editingBrand && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("h2", {
+    className: "text-neutral-800 font-bold mb-6 text-lg border-l-4 border-neutral-400 pl-3"
+  }, "Nouvelle Marque"), /*#__PURE__*/React.createElement("label", {
+    className: "text-[9px] uppercase font-bold text-neutral-400 tracking-wider"
+  }, "Nom"), /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    autoComplete: "off",
+    className: "w-full p-3 mb-4 bg-neutral-50 rounded-lg outline-none focus:bg-white",
+    value: newBrand.name,
+    onChange: e => setNewBrand({
+      ...newBrand,
+      name: e.target.value
+    })
+  }), /*#__PURE__*/React.createElement("label", {
+    className: "text-[9px] uppercase font-bold text-neutral-400 tracking-wider"
+  }, "Image"), /*#__PURE__*/React.createElement("input", {
+    type: "file",
+    accept: "image/*",
+    autoComplete: "off",
+    onChange: e => handleImageUpload(e, setNewBrand, newBrand),
+    className: "mb-8 w-full text-sm"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-3"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowModal(false),
+    className: "flex-1 py-3 bg-neutral-100 rounded-xl font-medium"
+  }, "Annuler"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => requestConfirm("addBrand", null, addBrand),
+    className: "flex-1 py-3 bg-green-700 text-white rounded-xl font-medium"
+  }, "Cr\xE9er"))), showManageModal && !editingBrand && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("h2", {
+    className: "text-neutral-800 font-bold mb-6 text-lg border-l-4 border-neutral-400 pl-3"
+  }, "Gestion"), brands.map(b => /*#__PURE__*/React.createElement("div", {
+    key: b.id,
+    className: "mb-3"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex items-center gap-2"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setManageSelectedBrand(manageSelectedBrand === b.id ? null : b.id),
+    className: "flex-1 p-4 bg-neutral-50 rounded-xl text-left font-semibold text-neutral-700 shadow-sm border border-neutral-200 hover:bg-neutral-100"
+  }, b.name)), manageSelectedBrand === b.id && /*#__PURE__*/React.createElement("div", {
+    className: "mt-2 pl-4"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "flex justify-center gap-2 mb-3"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => requestConfirm("deleteBrand", {
+      brandId: b.id
+    }, () => deleteBrand(b.id)),
+    className: "px-3 py-1.5 bg-red-100 text-red-700 rounded-lg text-xs font-bold active:scale-95"
+  }, "\u2715 Supprimer"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setEditingBrand(b),
+    className: "px-3 py-1.5 bg-neutral-200 text-neutral-700 rounded-lg text-xs font-bold active:scale-95"
+  }, "\u270E Modifier")), b.products.map(p => /*#__PURE__*/React.createElement("div", {
+    key: p.id,
+    className: "w-full mb-2 flex items-center gap-2"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setEditingProduct(editingProduct?.id === p.id ? null : p),
+    className: "flex-1 p-3 bg-white border border-neutral-200 text-neutral-700 text-xs font-medium rounded-lg shadow-sm hover:bg-neutral-50 text-left"
+  }, p.name), /*#__PURE__*/React.createElement("button", {
+    onClick: () => requestConfirm("deleteProduct", {
+      brandId: b.id,
+      productId: p.id
+    }, () => deleteProduct(b.id, p.id)),
+    className: "w-8 h-8 bg-red-100 text-red-600 rounded-full font-bold active:scale-95"
+  }, "\u2715"))), editingProduct && editingProduct.id && /*#__PURE__*/React.createElement("div", {
+    className: "p-4 mt-2 bg-neutral-50 rounded-2xl border border-neutral-200"
+  }, /*#__PURE__*/React.createElement("label", {
+    className: "text-[9px] font-bold text-neutral-400 uppercase"
+  }, "Nom"), /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    autoComplete: "off",
+    value: editingProduct.name,
+    className: "w-full p-2 mb-2 bg-white rounded-lg border border-neutral-200",
+    onChange: e => setEditingProduct({
+      ...editingProduct,
+      name: e.target.value
+    })
+  }), /*#__PURE__*/React.createElement("label", {
+    className: "text-[9px] font-bold text-neutral-400 uppercase"
+  }, "Quantit\xE9"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    autoComplete: "off",
+    value: editingProduct.qty,
+    className: "w-full p-2 mb-2 bg-white rounded-lg border border-neutral-200",
+    onChange: e => setEditingProduct({
+      ...editingProduct,
+      qty: e.target.value
+    })
+  }), /*#__PURE__*/React.createElement("label", {
+    className: "text-[9px] font-bold text-neutral-400 uppercase"
+  }, "Prix"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    autoComplete: "off",
+    value: editingProduct.price,
+    className: "w-full p-2 mb-3 bg-white rounded-lg border border-neutral-200",
+    onChange: e => setEditingProduct({
+      ...editingProduct,
+      price: e.target.value
+    })
+  }), /*#__PURE__*/React.createElement("label", {
+    className: "text-[9px] font-bold text-neutral-400 uppercase"
+  }, "Image"), /*#__PURE__*/React.createElement("input", {
+    type: "file",
+    accept: "image/*",
+    autoComplete: "off",
+    onChange: e => handleImageUpload(e, setEditingProduct, editingProduct),
+    className: "mb-3 w-full text-[10px]"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-2"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setEditingProduct(null),
+    className: "flex-1 py-2 bg-white border border-neutral-200 rounded-lg"
+  }, "Annuler"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => requestConfirm("saveProduct", null, saveProductEdit),
+    className: "flex-1 py-2 bg-green-700 text-white rounded-lg"
+  }, "Enregistrer")))))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowManageModal(false),
+    className: "w-full py-3 bg-neutral-800 text-white rounded-xl mt-4 font-medium"
+  }, "Fermer")), showBrandSelect && !editingBrand && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("h2", {
+    className: "text-neutral-800 font-bold mb-6 text-lg border-l-4 border-neutral-400 pl-3"
+  }, "Choisir Marque"), /*#__PURE__*/React.createElement("div", {
+    className: "grid grid-cols-2 gap-3 mb-6"
+  }, brands.map(b => /*#__PURE__*/React.createElement("button", {
+    key: b.id,
+    onClick: () => {
+      setNewProduct({
+        ...newProduct,
+        brandId: b.id
+      });
+      setShowBrandSelect(false);
+      setShowProductModal(true);
+    },
+    className: "p-3 bg-white border border-neutral-200 rounded-xl font-medium hover:bg-neutral-50"
+  }, b.name))), /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowBrandSelect(false),
+    className: "w-full py-3 bg-neutral-100 rounded-xl font-medium"
+  }, "Annuler")), showProductModal && !editingBrand && /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("h2", {
+    className: "text-neutral-800 font-bold mb-6 text-lg border-l-4 border-neutral-400 pl-3"
+  }, "Nouveau Produit"), /*#__PURE__*/React.createElement("label", {
+    className: "text-[9px] uppercase font-bold text-neutral-400 tracking-wider"
+  }, "Nom"), /*#__PURE__*/React.createElement("input", {
+    type: "text",
+    autoComplete: "off",
+    className: "w-full p-3 mb-3 bg-neutral-50 rounded-lg outline-none focus:bg-white",
+    onChange: e => setNewProduct({
+      ...newProduct,
+      name: e.target.value
+    })
+  }), /*#__PURE__*/React.createElement("label", {
+    className: "text-[9px] uppercase font-bold text-neutral-400 tracking-wider"
+  }, "Quantit\xE9"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    autoComplete: "off",
+    className: "w-full p-3 mb-3 bg-neutral-50 rounded-lg outline-none",
+    onChange: e => setNewProduct({
+      ...newProduct,
+      qty: e.target.value
+    })
+  }), /*#__PURE__*/React.createElement("label", {
+    className: "text-[9px] uppercase font-bold text-neutral-400 tracking-wider"
+  }, "Prix"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    autoComplete: "off",
+    className: "w-full p-3 mb-3 bg-neutral-50 rounded-lg outline-none",
+    onChange: e => setNewProduct({
+      ...newProduct,
+      price: e.target.value
+    })
+  }), /*#__PURE__*/React.createElement("label", {
+    className: "text-[9px] uppercase font-bold text-neutral-400 tracking-wider mt-2"
+  }, "Image"), /*#__PURE__*/React.createElement("input", {
+    type: "file",
+    accept: "image/*",
+    autoComplete: "off",
+    onChange: e => handleImageUpload(e, setNewProduct, newProduct),
+    className: "mb-6 w-full text-sm"
+  }), /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-3"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: () => setShowProductModal(false),
+    className: "flex-1 py-3 bg-neutral-100 rounded-xl font-medium"
+  }, "Annuler"), /*#__PURE__*/React.createElement("button", {
+    onClick: () => requestConfirm("addProduct", null, addProduct),
+    className: "flex-1 py-3 bg-green-700 text-white rounded-xl font-medium"
+  }, "Ajouter"))))), confirmAction && /*#__PURE__*/React.createElement("div", {
+    className: "fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center p-4 z-[200]"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "bg-white w-full max-w-[280px] rounded-2xl p-5 shadow-2xl"
+  }, /*#__PURE__*/React.createElement("p", {
+    className: "text-neutral-800 text-center font-medium mb-4"
+  }, "Confirmer l'action ?"), /*#__PURE__*/React.createElement("div", {
+    className: "flex gap-3"
+  }, /*#__PURE__*/React.createElement("button", {
+    onClick: cancelConfirm,
+    className: "flex-1 py-2 bg-neutral-100 rounded-xl font-medium active:scale-95"
+  }, "Annuler"), /*#__PURE__*/React.createElement("button", {
+    onClick: executeConfirm,
+    className: "flex-1 py-2 bg-green-700 text-white rounded-xl font-bold active:scale-95"
+  }, "Confirmer")))), /*#__PURE__*/React.createElement(DebugConsole, null)), /*#__PURE__*/React.createElement("style", {
+    jsx: true
+  }, `::-webkit-scrollbar { display: none; } @keyframes fade-in-down { from { opacity: 0; transform: translateY(-10px); } to { opacity: 1; transform: translateY(0); } } .animate-fade-in-down { animation: fade-in-down 0.3s ease-out; }`));
+};
+window.reactRoot = window.reactRoot || ReactDOM.createRoot(document.getElementById('root'));
+window.reactRoot.render(/*#__PURE__*/React.createElement(App, null));
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(/*#__PURE__*/React.createElement(App, null));</script><script>if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js');</script></body></html>
